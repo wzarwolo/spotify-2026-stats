@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Spotify Year</title>
+<style>
+.viz-root {
+  color-scheme: light;
+  --bg: #f4f3ef; --surface-1: #fcfcfb; --border: #e2e0d9;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7a7974;
+  --accent: #2a78d6; --grid: #ecebe6;
+  --seq-0: #eeede8; --seq-1: #cde2fb; --seq-2: #86b6ef; --seq-3: #3987e5; --seq-4: #1c5cab; --seq-5: #0d366b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --bg: #111110; --surface-1: #1a1a19; --border: #2e2d2a;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --accent: #3987e5; --grid: #262523;
+    --seq-0: #242422; --seq-1: #0d366b; --seq-2: #184f95; --seq-3: #256abf; --seq-4: #3987e5; --seq-5: #86b6ef;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+.viz-root { background: var(--bg); color: var(--text-primary); min-height: 100vh; padding: 40px 20px 80px; }
+.wrap { max-width: 1080px; margin: 0 auto; }
+header h1 { font-size: 40px; line-height: 1.1; margin: 0 0 6px; letter-spacing: -0.02em; }
+header p { margin: 0; color: var(--text-secondary); }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); margin: 44px 0 14px; font-weight: 600; }
+.grid { display: grid; gap: 14px; }
+.g4 { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; min-width: 0; }
+.card h3 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
+.stat .n { font-size: 34px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stat .l { color: var(--text-secondary); font-size: 13px; }
+.fun .k { color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+.fun .v { font-size: 19px; font-weight: 600; margin: 4px 0 2px; overflow-wrap: anywhere; }
+.fun .s { color: var(--text-secondary); font-size: 13px; }
+.persona { display: flex; gap: 18px; align-items: center; }
+.persona .n { font-size: 30px; font-weight: 700; }
+ol.rank { list-style: none; margin: 0; padding: 0; }
+ol.rank li { display: grid; grid-template-columns: 24px 1fr auto; gap: 8px; align-items: center; padding: 5px 0; }
+ol.rank .i { color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 13px; }
+ol.rank .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ol.rank .t small { color: var(--text-secondary); }
+ol.rank .bar { grid-column: 2 / 4; height: 4px; border-radius: 2px; background: var(--accent); margin-top: -2px; }
+ol.rank .val { color: var(--text-secondary); font-variant-numeric: tabular-nums; font-size: 13px; }
+.tabs { display: inline-flex; gap: 4px; background: var(--bg); padding: 3px; border-radius: 8px; margin-bottom: 10px; }
+.tabs button { border: 0; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+.tabs button[aria-pressed="true"] { background: var(--surface-1); color: var(--text-primary); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+svg text { fill: var(--text-muted); font-size: 11px; }
+.tip { position: fixed; pointer-events: none; background: var(--text-primary); color: var(--surface-1); font-size: 12px; padding: 6px 9px; border-radius: 6px; opacity: 0; transition: opacity .08s; z-index: 9; white-space: nowrap; }
+.legend { display: flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: 11px; margin-top: 8px; }
+.legend i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+.pill { display: inline-block; padding: 3px 9px; border: 1px solid var(--border); border-radius: 99px; font-size: 13px; margin: 3px 4px 0 0; }
+.empty { color: var(--text-muted); }
+details { margin-top: 10px; } summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+table { border-collapse: collapse; font-size: 12px; margin-top: 6px; } td, th { padding: 2px 10px 2px 0; text-align: left; }
+footer { margin-top: 50px; color: var(--text-muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="viz-root"><div class="wrap" id="app"></div></div>
+<div class="tip" id="tip"></div>
+<script>
+const S = /*__STATS__*/null;
+const $ = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content.firstElementChild; };
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt = (n) => Number(n ?? 0).toLocaleString();
+const hr = (h) => h == null ? '—' : `${(h % 12) || 12} ${h < 12 ? 'AM' : 'PM'}`;
+const tip = document.getElementById('tip');
+function showTip(e, html) { tip.innerHTML = html; tip.style.opacity = 1; tip.style.left = (e.clientX + 12) + 'px'; tip.style.top = (e.clientY - 34) + 'px'; }
+function hideTip() { tip.style.opacity = 0; }
+function split(name) { const i = name.lastIndexOf(' — '); return i < 0 ? [name, ''] : [name.slice(0, i), name.slice(i + 3)]; }
+
+function rankList(items, unit) {
+  if (!items?.length) return '<p class="empty">No data</p>';
+  const max = items[0].value || 1;
+  return `<ol class="rank">${items.map((d, i) => {
+    const [a, b] = split(d.name);
+    return `<li><span class="i">${i + 1}</span><span class="t" title="${esc(d.name)}">${esc(a)}${b ? ` <small>${esc(b)}</small>` : ''}</span><span class="val">${fmt(Math.round(d.value))} ${unit}</span><span class="bar" style="width:${(d.value / max * 100).toFixed(1)}%"></span></li>`;
+  }).join('')}</ol>`;
+}
+function rankCard(title, byMin, byPlays) {
+  const el = $(`<div class="card"><h3>${title}</h3><div class="tabs"><button aria-pressed="true">Minutes</button>${byPlays ? '<button aria-pressed="false">Plays</button>' : ''}</div><div class="body">${rankList(byMin, 'min')}</div></div>`);
+  const [b1, b2] = el.querySelectorAll('button'); const body = el.querySelector('.body');
+  if (b2) {
+    b1.onclick = () => { b1.ariaPressed = 'true'; b2.ariaPressed = 'false'; body.innerHTML = rankList(byMin, 'min'); };
+    b2.onclick = () => { b2.ariaPressed = 'true'; b1.ariaPressed = 'false'; body.innerHTML = rankList(byPlays, 'plays'); };
+  }
+  return el;
+}
+
+// Vertical bar chart: single series, 4px rounded tops, 2px gaps, hover tooltip, table view.
+function barChart(title, data, unit, every = 1) {
+  const W = 480, H = 190, pl = 34, pb = 22, pt = 8;
+  const max = Math.max(1, ...data.map(d => d.value));
+  const step = niceStep(max); const top = Math.ceil(max / step) * step;
+  const bw = (W - pl) / data.length;
+  const y = (v) => pt + (H - pt - pb) * (1 - v / top);
+  let g = '';
+  for (let v = 0; v <= top; v += step) g += `<line x1="${pl}" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${pl - 6}" y="${y(v) + 4}" text-anchor="end">${short(v)}</text>`;
+  const bars = data.map((d, i) => {
+    const x = pl + i * bw + 1, w = Math.max(1, bw - 2), h = y(0) - y(d.value), yy = y(d.value), r = Math.min(4, w / 2, h);
+    const path = h <= 0 ? '' : `M${x},${y(0)} V${yy + r} Q${x},${yy} ${x + r},${yy} H${x + w - r} Q${x + w},${yy} ${x + w},${yy + r} V${y(0)} Z`;
+    return `<g data-i="${i}"><rect x="${pl + i * bw}" y="${pt}" width="${bw}" height="${H - pt - pb}" fill="transparent"/><path d="${path}" fill="var(--accent)"/>${i % every === 0 ? `<text x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${esc(d.label)}</text>` : ''}</g>`;
+  }).join('');
+  const el = $(`<div class="card"><h3>${title}</h3><svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(title)}">${g}${bars}</svg>
+    <details><summary>Table view</summary><table>${data.map(d => `<tr><td>${esc(d.label)}</td><td>${fmt(d.value)} ${unit}</td></tr>`).join('')}</table></details></div>`);
+  el.querySelectorAll('g[data-i]').forEach(n => {
+    const d = data[+n.dataset.i];
+    n.onmousemove = (e) => { n.querySelector('path').style.opacity = .75; showTip(e, `<b>${esc(d.label)}</b> · ${fmt(d.value)} ${unit}`); };
+    n.onmouseleave = () => { n.querySelector('path').style.opacity = 1; hideTip(); };
+  });
+  return el;
+}
+function niceStep(max) { const raw = max / 4, p = 10 ** Math.floor(Math.log10(raw)), f = raw / p; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p; }
+function short(v) { return v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + 'k' : v; }
+function seq(v, max) { if (!v) return 'var(--seq-0)'; const t = v / max; return `var(--seq-${t < .2 ? 1 : t < .4 ? 2 : t < .6 ? 3 : t < .8 ? 4 : 5})`; }
+function seqLegend() { return `<div class="legend">Less ${[0,1,2,3,4,5].map(i => `<i style="background:var(--seq-${i})"></i>`).join('')} More</div>`; }
+
+function heatmap(title, m) {
+  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const cw = 18, ch = 18, pl = 34, pt = 4, W = pl + 24 * (cw + 2), H = pt + 7 * (ch + 2) + 18;
+  const max = Math.max(1, ...m.flat());
+  let s = '';
+  m.forEach((row, d) => {
+    s += `<text x="${pl - 6}" y="${pt + d * (ch + 2) + 13}" text-anchor="end">${days[d]}</text>`;
+    row.forEach((v, h) => s += `<rect data-d="${d}" data-h="${h}" x="${pl + h * (cw + 2)}" y="${pt + d * (ch + 2)}" width="${cw}" height="${ch}" rx="3" fill="${seq(v, max)}"/>`);
+  });
+  [0, 6, 12, 18, 23].forEach(h => s += `<text x="${pl + h * (cw + 2) + cw / 2}" y="${H - 4}" text-anchor="middle">${hr(h)}</text>`);
+  const el = $(`<div class="card"><h3>${title}</h3><svg viewBox="0 0 ${W} ${H}" width="100%">${s}</svg>${seqLegend()}</div>`);
+  el.querySelectorAll('rect').forEach(r => {
+    const d = +r.dataset.d, h = +r.dataset.h;
+    r.onmousemove = (e) => showTip(e, `<b>${days[d]} ${hr(h)}</b> · ${fmt(m[d][h])} min`);
+    r.onmouseleave = hideTip;
+  });
+  return el;
+}
+
+function calendar(title, cal) {
+  if (!cal.length) return $('<div></div>');
+  const c = 12, gap = 2, pl = 28, pt = 16;
+  const first = new Date(cal[0][0] + 'T00:00');
+  const offset = (first.getDay() + 6) % 7;
+  const weeks = Math.ceil((cal.length + offset) / 7);
+  const W = pl + weeks * (c + gap), H = pt + 7 * (c + gap);
+  const max = Math.max(1, ...cal.map(d => d[1]));
+  let s = '', lastM = -1;
+  cal.forEach(([date, v], i) => {
+    const k = i + offset, w = Math.floor(k / 7), d = k % 7, dt = new Date(date + 'T00:00');
+    if (dt.getMonth() !== lastM && d === 0 || i === 0) { lastM = dt.getMonth(); s += `<text x="${pl + w * (c + gap)}" y="10">${dt.toLocaleString('en', { month: 'short' })}</text>`; }
+    s += `<rect data-i="${i}" x="${pl + w * (c + gap)}" y="${pt + d * (c + gap)}" width="${c}" height="${c}" rx="2" fill="${seq(v, max)}"/>`;
+  });
+  ['Mon', 'Wed', 'Fri'].forEach((l, j) => s += `<text x="0" y="${pt + j * 2 * (c + gap) + 10}">${l}</text>`);
+  const el = $(`<div class="card"><h3>${title}</h3><div style="overflow-x:auto"><svg viewBox="0 0 ${W} ${H}" width="${Math.max(W, 700)}" style="max-width:100%;min-width:640px">${s}</svg></div>${seqLegend()}</div>`);
+  el.querySelectorAll('rect').forEach(r => {
+    const [date, v] = cal[+r.dataset.i];
+    r.onmousemove = (e) => showTip(e, `<b>${new Date(date + 'T00:00').toLocaleDateString('en', { weekday: 'short', month: 'short', day: 'numeric' })}</b> · ${fmt(v)} min`);
+    r.onmouseleave = hideTip;
+  });
+  return el;
+}
+
+const stat = (n, l) => `<div class="card stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;
+const fun = (k, v, s) => v == null || v === '' ? '' : `<div class="card fun"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s || ''}</div></div>`;
+
+function render() {
+  const app = document.getElementById('app');
+  if (!S) { app.innerHTML = '<h1>No stats loaded</h1><p>Run <code>python3 spotify_stats.py</code> to build this page from your Spotify export.</p>'; return; }
+  const t = S.totals, f = S.fun;
+  document.title = `My Spotify ${S.year}`;
+  app.append($(`<header><h1>My Spotify ${S.year}</h1><p>${S.range ? `${S.range[0]} – ${S.range[1]}` : ''} · ${fmt(t.plays)} plays · built locally from your Spotify export</p></header>`));
+
+  app.append($('<h2>The big numbers</h2>'));
+  app.append($(`<div class="grid g4">
+    ${stat(fmt(t.minutes), `minutes listened (${fmt(t.hours)} hours · ${t.days} days)`)}
+    ${stat(fmt(t.streams), 'streams (30 s or more)')}
+    ${stat(fmt(t.unique_tracks), 'different songs')}
+    ${stat(fmt(t.unique_artists), 'different artists')}
+    ${t.unique_albums ? stat(fmt(t.unique_albums), 'different albums') : ''}
+    ${stat(fmt(t.active_days), 'days you pressed play')}
+    ${stat(fmt(t.avg_per_active_day), 'avg minutes on a listening day')}
+    ${t.podcast_minutes ? stat(fmt(t.podcast_minutes), 'podcast minutes') : ''}
+  </div>`));
+
+  app.append($(`<div class="card persona" style="margin-top:14px"><div><div class="fun"><div class="k">Your listening personality</div></div><div class="n">${esc(f.persona)}</div><div class="s" style="color:var(--text-secondary)">${esc(f.persona_why)}</div></div></div>`));
+
+  app.append($('<h2>Your top</h2>'));
+  const tops = $('<div class="grid g3"></div>');
+  tops.append(rankCard('Top songs', S.top_tracks.slice(0, 10), S.top_tracks_plays.slice(0, 10)));
+  tops.append(rankCard('Top artists', S.top_artists.slice(0, 10), S.top_artists_plays.slice(0, 10)));
+  if (S.top_albums.length) tops.append(rankCard('Top albums', S.top_albums));
+  if (S.top_podcasts.length) tops.append(rankCard('Top podcasts', S.top_podcasts));
+  app.append(tops);
+
+  app.append($('<h2>When you listened</h2>'));
+  const when = $('<div class="grid g2"></div>');
+  when.append(barChart('Minutes by month', S.monthly, 'min'));
+  when.append(barChart('Minutes by hour of day', S.hourly.map(d => ({ ...d, label: hr(+d.label) })), 'min', 6));
+  when.append(barChart('Minutes by weekday', S.weekday, 'min'));
+  when.append(heatmap('Weekly rhythm', S.heatmap));
+  app.append(when);
+  app.append($('<div style="height:14px"></div>'));
+  app.append(calendar('Every day of the year', S.calendar));
+
+  app.append($('<h2>Unique stats</h2>'));
+  const ob = f.obsession, rr = f.repeat_run, cf = f.comfort, ls = f.longest_session, ln = f.late_night_anthem, ms = f.most_skipped;
+  app.append($(`<div class="grid g3">
+    ${fun('Biggest day', f.biggest_day.date, `${fmt(f.biggest_day.minutes)} minutes in one day`)}
+    ${fun('Longest streak', `${f.streak.days} days in a row`, f.streak.from ? `${f.streak.from} → ${f.streak.to}` : '')}
+    ${ls ? fun('Longest session', `${fmt(ls.minutes)} min · ${ls.tracks} tracks`, `${ls.start} → ${ls.end}`) : ''}
+    ${ob ? fun('On-repeat day', esc(split(ob.track)[0]), `${ob.plays} plays on ${ob.date} · ${esc(split(ob.track)[1])}`) : ''}
+    ${rr ? fun('Back-to-back record', esc(split(rr.track)[0]), `played ${rr.times}× in a row`) : ''}
+    ${cf ? fun('Comfort song', esc(split(cf.track)[0]), `you came back to it on ${cf.days} different days`) : ''}
+    ${ln ? fun('Late-night anthem', esc(split(ln.track)[0]), `${ln.plays} plays between midnight and 5 AM`) : ''}
+    ${fun('Peak hour', hr(f.peak_hour), `busiest weekday: ${f.busiest_weekday}`)}
+    ${fun('Night owl score', `${f.night_share}%`, 'of listening between midnight and 5 AM')}
+    ${fun('Weekend share', `${f.weekend_share}%`, 'of listening on Sat & Sun (28.6% would be even)')}
+    ${fun('Artist loyalty', `${f.top5_share}%`, 'of music time went to your top 5 artists')}
+    ${fun('Variety score', `~${fmt(f.effective_artists)} artists`, `effective number of artists (entropy) · Gini ${f.artist_gini}`)}
+    ${fun('One-song wonders', fmt(f.one_song_artists), 'artists you streamed exactly one song by')}
+    ${f.completion_rate != null ? fun('Stick-around rate', `${f.completion_rate}%`, 'of plays lasted 30 s or more') : ''}
+    ${f.skip_rate != null ? fun('Skip rate', `${f.skip_rate}%`, 'of plays you skipped') : ''}
+    ${f.shuffle_rate != null ? fun('Shuffle', `${f.shuffle_rate}%`, 'of plays were on shuffle') : ''}
+    ${f.offline_rate ? fun('Offline', `${f.offline_rate}%`, 'of plays were downloaded / offline') : ''}
+    ${f.incognito_rate ? fun('Private session', `${f.incognito_rate}%`, 'of plays in a private session') : ''}
+    ${ms ? fun('Most skipped', esc(split(ms.track)[0]), `skipped ${ms.times} times · ${esc(split(ms.track)[1])}`) : ''}
+    ${fun('Sessions', fmt(f.sessions), `average ${f.avg_session_min} min each (new session after a 20-min gap)`)}
+    ${fun('First song of the year', esc(split(f.first_song || '')[0]), `${esc(split(f.first_song || '')[1])} · ${f.first_when || ''}`)}
+    ${fun('Most recent song', esc(split(f.latest_song || '')[0]), `${esc(split(f.latest_song || '')[1])} · ${f.latest_when || ''}`)}
+  </div>`));
+
+  app.append($('<h2>Discovery & taste over time</h2>'));
+  const disc = $('<div class="grid g2"></div>');
+  disc.append(barChart('New artists discovered each month', S.new_artists_per_month, 'artists'));
+  disc.append($(`<div class="card"><h3>Top artist each month</h3><ol class="rank">${S.top_artist_by_month.map(d => `<li><span class="i" style="width:30px">${d.month}</span><span class="t">${esc(d.artist)}</span><span class="val">${fmt(d.minutes)} min</span></li>`).join('')}</ol>
+    ${f.ride_or_die.length ? `<p style="margin:14px 0 0;color:var(--text-secondary);font-size:13px">Ride-or-die (played every month):</p>${f.ride_or_die.map(a => `<span class="pill">${esc(a)}</span>`).join('')}` : ''}</div>`));
+  app.append(disc);
+
+  if (S.has_extended) {
+    app.append($('<h2>How & where</h2>'));
+    const how = $('<div class="grid g3"></div>');
+    if (S.platforms.length) how.append(rankCard('Devices (plays)', S.platforms.map(d => ({ ...d }))));
+    if (S.countries.length) how.append(rankCard('Countries (plays)', S.countries));
+    if (f.reason_end.length) how.append(rankCard('Why tracks ended (plays)', f.reason_end));
+    how.querySelectorAll('.val').forEach(v => v.textContent = v.textContent.replace(' min', ''));
+    how.querySelectorAll('.tabs').forEach(v => v.remove());
+    app.append(how);
+  }
+  app.append($(`<footer>Generated from ${S.source_files} export file(s). A "stream" = 30+ seconds, matching Spotify's own rule. Hover any chart for exact values.</footer>`));
+}
+render();
+</script>
+</body>
+</html>

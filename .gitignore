@@ -1,0 +1,7 @@
+# Your personal listening data — never commit it
+data/
+output/
+sample/
+*.zip
+__pycache__/
+.DS_Store
