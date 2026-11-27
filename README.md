@@ -25,6 +25,17 @@ python3 spotify_stats.py --tz America/New_York
 open output/spotify_2026.html
 ```
 
+### Genres (optional)
+
+Spotify's export has no genres, so add `--genres` to look them up on [MusicBrainz](https://musicbrainz.org)
+(free, no account). **Only artist names are sent**: nothing about you or your listening. The first run
+takes about 20 minutes (MusicBrainz allows ~1 request per second); results are cached in
+`data/genres_cache.json`, so later runs are instant and offline.
+
+```bash
+python3 spotify_stats.py --genres
+```
+
 Options: `--year 2025`, `--data path/to/folder_or.zip`, `--out file.html`, `--json stats.json`.
 
 Want to preview first? `python3 make_sample_data.py && python3 spotify_stats.py --data sample`.
@@ -43,11 +54,15 @@ minutes (25%), days played (20%), months present (15%), different songs (15%), s
 and years the artist appears in your history (15%). Each signal is scaled against your #1 artist.
 Tweak `SCORE_WEIGHTS` in `spotify_stats.py` to change the balance.
 
+**Genres:** favorite genres (with your top artist in each), genres you picked up this year,
+top genre each month, genre range, genre loyalty, most niche genre, and a genre comeback.
+Each artist's minutes are split across their top 3 genres (50/30/20).
+
 **Compare with past years:** pick any earlier year and see changes in minutes, streams, variety,
 discovery, loyalty (top-5 share), skip and shuffle rate, and night listening. Toggle between *same dates*
 (fair for an unfinished year) and *full years*. Also shows a loyalty check (your old top 25 artists still in
 your top 50), biggest climbers, new arrivals, artists who faded out, personality shift, minutes and
-discovery per year, and your #1 artist every year. Years with fewer than 200 streams are skipped.
+discovery per year, and your #1 artist and #1 genre every year, plus rising and fading genres. Years with fewer than 200 streams are skipped.
 
 **Unique stats**
 - Listening personality (Night Owl / Early Bird / Superfan / Explorer / All-Rounder)
@@ -73,6 +88,7 @@ discovery per year, and your #1 artist every year. Years with fewer than 200 str
 |---|---|
 | `spotify_stats.py` | Loads the export (folder or zip), filters to the year, computes stats, writes HTML |
 | `dashboard_template.html` | The dashboard; stats are injected as JSON. No external scripts or CDNs |
+| `genres.py` | Optional MusicBrainz genre lookup with an on-disk cache |
 | `make_sample_data.py` | Writes fake data to `sample/` for a demo |
 
 `data/`, `output/` and `sample/` are git-ignored so your listening history isn't pushed.

@@ -176,6 +176,7 @@ function calendar(title, cal) {
   return el;
 }
 
+const listCard = (title, items, unit, note) => items?.length ? $(`<div class="card"><h3>${title}</h3>${rankList(items, unit)}${note ? `<p style="margin:10px 0 0;color:var(--text-secondary);font-size:13px">${note}</p>` : ''}</div>`) : null;
 const stat = (n, l) => `<div class="card stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;
 const fun = (k, v, s) => v == null || v === '' ? '' : `<div class="card fun"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s || ''}</div></div>`;
 
@@ -223,6 +224,27 @@ function render() {
         <div class="parts">${parts}</div></div>`));
     });
     app.append(g);
+  }
+
+  // ---- Genres -------------------------------------------------------------
+  const G = S.genres;
+  if (G?.top?.length) {
+    app.append($('<h2>Your genres</h2>'));
+    const gg = $('<div class="grid g3"></div>');
+    gg.append(listCard('Favorite genres', G.top.slice(0, 10).map(d => ({ name: d.artist ? `${d.name} — ${d.artist}` : d.name, value: d.value })), 'min',
+      'Small text = your top artist in that genre. Each artist’s minutes are split across their top 3 genres.'));
+    if (X.new_genres?.length) gg.append(listCard(`Genres you picked up in ${S.year}`, X.new_genres.map(d => ({ name: `${d.name} — via ${d.artist}, from ${d.since}`, value: d.value })), 'min',
+      'Under 20 minutes in all earlier years combined, real listening this year.'));
+    if (G.by_month?.length) gg.append($(`<div class="card"><h3>Genre of each month</h3><ol class="rank">${G.by_month.map(d => `<li class="wide"><span class="i">${d.month}</span><span class="t">${esc(d.standout || d.genre)}</span><span class="val">top: ${esc(d.genre)}</span></li>`).join('')}</ol><p style="margin:10px 0 0;color:var(--text-secondary);font-size:13px">Left: the genre you played way more than usual that month. Right: the month’s biggest genre.</p></div>`));
+    app.append(gg);
+    const gc = X.genre_comeback, ng = X.niche_genre;
+    app.append($(`<div class="grid g3" style="margin-top:14px">
+      ${fun('Genre range', `${fmt(G.distinct)} genres`, 'with at least 30 minutes of listening')}
+      ${fun('Genre loyalty', `${G.top3_share}%`, `of your genre time went to your top 3: ${G.top.slice(0, 3).map(d => esc(d.name)).join(', ')}`)}
+      ${ng ? fun('Most niche genre', esc(ng.name), `${fmt(ng.minutes)} min, and only ${ng.artists} artist${ng.artists === 1 ? '' : 's'} in your library carry it`) : ''}
+      ${gc ? fun('Genre comeback', esc(gc.name), `${fmt(gc.peak)} min in ${gc.peak_year}, quiet last year, ${fmt(gc.value)} min now`) : ''}
+    </div>`));
+    app.append($(`<p style="color:var(--text-muted);font-size:12px;margin:8px 0 0">Genres come from MusicBrainz and cover ${G.coverage}% of your listening time (artists with no genre listed are left out).</p>`));
   }
 
   // ---- Compare years ------------------------------------------------------
@@ -281,12 +303,24 @@ function render() {
       g2.append($(`<div class="card"><h3>New in your top 15</h3>${li(arrivals, d => `${fmt(d.value)} min`)}<p style="color:var(--text-muted);font-size:12px;margin:8px 0 0">Not in your top 200 in ${state.year}</p></div>`));
       g2.append($(`<div class="card"><h3>Faded out</h3>${li(fell, d => `${fmt(d.value)} min then`)}<p style="color:var(--text-muted);font-size:12px;margin:8px 0 0">In your ${state.year} top 15, outside your top 100 now</p></div>`));
       g2.append($(`<div class="card"><h3>Personality shift</h3><div class="fun"><div class="v">${esc(old.persona)} → ${esc(cur.persona)}</div><div class="s">Peak hour ${hr(old.peak_hour)} → ${hr(cur.peak_hour)}</div></div></div>`));
+      if (cur.genres?.length && old.genres?.length) {
+        const share = (list) => { const t = list.reduce((s, g) => s + g[1], 0) || 1; return Object.fromEntries(list.map(g => [g[0], 100 * g[1] / t])); };
+        const sc = share(cur.genres), so = share(old.genres);
+        const names = [...new Set([...Object.keys(sc), ...Object.keys(so)])];
+        const moves = names.map(n => ({ name: n, d: (sc[n] || 0) - (so[n] || 0), now: sc[n] || 0, then: so[n] || 0 }));
+        const up = moves.filter(m => m.d > 0.3).sort((a, b) => b.d - a.d).slice(0, 6);
+        const down = moves.filter(m => m.d < -0.3).sort((a, b) => a.d - b.d).slice(0, 6);
+        const gl = (items) => items.length ? `<ol class="rank">${items.map((d, i) => `<li><span class="i">${i + 1}</span><span class="t">${esc(d.name)}</span><span class="val">${d.then.toFixed(1)}% → ${d.now.toFixed(1)}%</span></li>`).join('')}</ol>` : '<p class="empty">None</p>';
+        g2.append($(`<div class="card"><h3>Rising genres</h3>${gl(up)}<p style="color:var(--text-muted);font-size:12px;margin:8px 0 0">Share of your genre time, ${state.year} → ${S.year}</p></div>`));
+        g2.append($(`<div class="card"><h3>Fading genres</h3>${gl(down)}</div>`));
+      }
       out.append(g2);
       const allYears = Object.keys(H).map(Number).sort();
       const g3 = $('<div class="grid g2" style="margin-top:14px"></div>');
       g3.append(barChart(`Minutes per year (${state.mode === 'ytd' ? 'Jan 1 – ' + S.cutoff : 'full year'})`, allYears.map(y => ({ label: String(y), value: (H[y][state.mode] || H[y].full).minutes })), 'min'));
       g3.append(barChart('New artists discovered per year', allYears.map(y => ({ label: String(y), value: (H[y][state.mode] || H[y].full).new_artists })), 'artists'));
       g3.append($(`<div class="card"><h3>Your #1 artist each year</h3><ol class="rank">${allYears.slice().reverse().map(y => { const a = (H[y][state.mode] || H[y].full).artists[0]; return `<li class="wide"><span class="i">${y}</span><span class="t">${esc(a[0])}</span><span class="val">${fmt(a[1])} min</span></li>`; }).join('')}</ol></div>`));
+      if ((H[S.year].full.genres || []).length) g3.append($(`<div class="card"><h3>Your #1 genre each year</h3><ol class="rank">${allYears.slice().reverse().map(y => { const g = ((H[y][state.mode] || H[y].full).genres || [])[0]; return g ? `<li class="wide"><span class="i">${y}</span><span class="t">${esc(g[0])}</span><span class="val">${fmt(g[1])} min</span></li>` : ''; }).join('')}</ol></div>`));
       g3.append(barChart('Loyalty by year (top-5 artists’ share of minutes)', allYears.map(y => ({ label: String(y), value: (H[y][state.mode] || H[y].full).top5_share })), '%'));
       out.append(g3);
     }

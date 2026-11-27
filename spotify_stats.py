@@ -27,6 +27,9 @@ from zoneinfo import ZoneInfo
 HERE = Path(__file__).resolve().parent
 TEMPLATE = HERE / "dashboard_template.html"
 
+GENRES: dict[str, list[str]] = {}   # artist -> genres; filled by --genres (see genres.py)
+GENRE_WEIGHTS = [0.5, 0.3, 0.2]      # an artist's minutes are split across its top 3 genres
+
 STREAM_MS = 30_000          # Spotify counts a "stream" at 30 seconds
 SESSION_GAP = timedelta(minutes=20)
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -171,6 +174,38 @@ def _gini(values) -> float:
         return 0.0
     cum = sum((i + 1) * x for i, x in enumerate(v))
     return (2 * cum) / (n * sum(v)) - (n + 1) / n
+
+
+def genre_minutes(played: list[dict]) -> tuple[Counter, float]:
+    """Minutes per genre, and the % of minutes whose artist has a known genre."""
+    out, known, total = Counter(), 0.0, 0.0
+    for r in played:
+        m = r["ms"] / 60000
+        total += m
+        gs = GENRES.get(r["artist"]) or []
+        if not gs:
+            continue
+        known += m
+        w = GENRE_WEIGHTS[:len(gs[:3])]
+        for g, wt in zip(gs, w):
+            out[g] += m * wt / sum(w)
+    return out, (100 * known / total if total else 0.0)
+
+
+def _genre_months(by_month: dict, year_g: Counter) -> list[dict]:
+    """Top genre each month, plus the 'standout': the genre whose share that
+    month most exceeds its share for the whole year (needs 30+ minutes)."""
+    ytot = sum(year_g.values()) or 1
+    out = []
+    for m, rs in sorted(by_month.items()):
+        g, _ = genre_minutes(rs)
+        if not g:
+            continue
+        mtot = sum(g.values())
+        lift = [(v / mtot - year_g[k] / ytot, k) for k, v in g.items() if v >= 30]
+        out.append({"month": MONTHS[m - 1], "genre": g.most_common(1)[0][0],
+                    "standout": max(lift)[1] if lift else None})
+    return out
 
 
 def compute(rows: list[dict], year: int, past: list[dict] | None = None, light: bool = False) -> dict:
@@ -357,10 +392,32 @@ def compute(rows: list[dict], year: int, past: list[dict] | None = None, light: 
 
     extras = {} if light else extra_stats(rows, streams, played, past, year, prior_artists,
                                          first_seen, by_artist_min, tkey)
+    gmin, gcov = genre_minutes(played)
+    genres = None
+    if GENRES:
+        by_m = defaultdict(list)
+        for r in played:
+            by_m[r["end"].month].append(r)
+        top_artist_in = {}
+        for g, _ in gmin.most_common(20):
+            c = Counter()
+            for r in played:
+                if g in (GENRES.get(r["artist"]) or [])[:3]:
+                    c[r["artist"]] += r["ms"] / 60000
+            top_artist_in[g] = c.most_common(1)[0][0] if c else None
+        genres = {
+            "top": [{"name": g, "value": round(v), "artist": top_artist_in.get(g)} for g, v in gmin.most_common(15)],
+            "coverage": round(gcov, 1),
+            "distinct": sum(1 for v in gmin.values() if v >= 30),
+            "top3_share": round(100 * sum(v for _, v in gmin.most_common(3)) / (sum(gmin.values()) or 1), 1),
+            "by_month": [] if light else _genre_months(by_m, gmin),
+            "all": [[g, round(v)] for g, v in gmin.most_common(60)],
+        }
     clock = [sum(hourly[5:12]), sum(hourly[12:17]), sum(hourly[17:22]), sum(hourly[22:]) + sum(hourly[:5])]
     return {
         "year": year,
         "extras": extras,
+        "genres": genres,
         "clock": [{"label": l, "value": round(100 * v / (total_min or 1), 1)}
                   for l, v in zip(["Morning (5–12)", "Afternoon (12–5)", "Evening (5–10)", "Night (10–5)"], clock)],
         "artist_minutes": [[a, round(m), by_artist_plays[a]] for a, m in by_artist_min.most_common(200)],
@@ -519,6 +576,48 @@ def extra_stats(rows, streams, played, past, year, prior_artists, first_seen, by
     # Objective top artists
     x["true_top"] = artist_scores(played, streams, past)
     x["score_weights"] = {SCORE_LABELS[k]: v for k, v in SCORE_WEIGHTS.items()}
+
+    # Genres you picked up this year: real time now, almost none before
+    if GENRES:
+        now_g, _ = genre_minutes(played)
+        past_played = [r for r in past if r["kind"] == "track" and r["ms"] > 0]
+        past_g, _ = genre_minutes(past_played)
+        picked = []
+        for g, v in now_g.most_common():
+            if v >= 45 and past_g.get(g, 0) < 20:
+                fans = Counter()
+                first = None
+                for r in played:
+                    if g in (GENRES.get(r["artist"]) or [])[:3]:
+                        fans[r["artist"]] += r["ms"] / 60000
+                        first = first or r["end"]
+                picked.append({"name": g, "value": round(v), "artist": fans.most_common(1)[0][0],
+                               "since": first.strftime("%b %-d") if first else None})
+        x["new_genres"] = picked[:10]
+        # Rediscovered: genre that was big in an earlier year, quiet last year, back now
+        by_year = defaultdict(list)
+        for r in past_played:
+            by_year[r["end"].year].append(r)
+        yg = {y: genre_minutes(rs)[0] for y, rs in by_year.items()}
+        last = yg.get(year - 1, Counter())
+        back = []
+        for g, v in now_g.most_common(40):
+            peaks = [(yg[y].get(g, 0), y) for y in yg if y < year - 1]
+            if peaks and v >= 60:
+                pk, py = max(peaks)
+                if pk >= 300 and last.get(g, 0) < pk * 0.1:
+                    back.append({"name": g, "value": round(v), "peak_year": py, "peak": round(pk)})
+        if back:
+            x["genre_comeback"] = max(back, key=lambda b: b["value"])
+        # Most niche genre: smallest genre with real listening (fewest artists in your library)
+        artists_in = Counter()
+        for a, gs in GENRES.items():
+            for g in gs[:3]:
+                artists_in[g] += 1
+        niche = [(artists_in[g], -v, g) for g, v in now_g.items() if v >= 60]
+        if niche:
+            n, v, g = min(niche)
+            x["niche_genre"] = {"name": g, "minutes": round(-v), "artists": n}
 
     # Longest-running favorite: artist in your current top 50 you've known longest
     past_first = {}
@@ -694,6 +793,7 @@ def year_summary(st: dict) -> dict:
         "peak_hour": f["peak_hour"], "persona": f["persona"],
         "streak": f["streak"]["days"], "one_song_artists": f["one_song_artists"],
         "artists": st["artist_minutes"], "tracks": st["track_minutes"][:100],
+        "genres": st["genres"]["all"] if st.get("genres") else [],
     }
 
 
@@ -727,6 +827,10 @@ def main():
     ap.add_argument("--tz", default=None, help="IANA timezone, e.g. America/New_York (default: this computer's)")
     ap.add_argument("--out", default=str(HERE / "output" / "spotify_2026.html"))
     ap.add_argument("--json", default=None, help="also write raw stats JSON here")
+    ap.add_argument("--genres", action="store_true",
+                    help="look up artist genres on MusicBrainz (sends artist names only; cached in data/)")
+    ap.add_argument("--genre-artists", type=int, default=300,
+                    help="how many of your top artists to look up for the main year (default 300)")
     args = ap.parse_args()
 
     tz = ZoneInfo(args.tz) if args.tz else datetime.now().astimezone().tzinfo
@@ -738,6 +842,25 @@ def main():
     if not rows:
         raise SystemExit(f"Found {len(files)} file(s) but no plays in {args.year}.")
     past = [r for r in all_rows if r["end"].year < args.year]
+
+    import sys
+    sys.path.insert(0, str(HERE))
+    import genres as genre_lookup
+    cache = HERE / "data" / "genres_cache.json"
+    if args.genres:
+        mins = defaultdict(lambda: Counter())
+        for r in all_rows:
+            if r["kind"] == "track" and r["end"].year <= args.year:
+                mins[r["end"].year][r["artist"]] += r["ms"]
+        want = [a for a, _ in mins[args.year].most_common(args.genre_artists)]
+        for y, c in mins.items():
+            if y != args.year:
+                want += [a for a, _ in c.most_common(100)]
+        GENRES.update(genre_lookup.fetch(want, cache))
+    elif cache.exists():
+        GENRES.update(json.loads(cache.read_text()))   # reuse earlier lookups, no network
+    for artist, gs in list(GENRES.items()):           # drop tags that aren't genres
+        GENRES[artist] = [g for g in gs if genre_lookup.is_genre(g)]
 
     stats = compute(rows, args.year, past)
     last = rows[-1]["end"]
