@@ -236,7 +236,8 @@ function render() {
 
   app.append($('<h2>Discovery & taste over time</h2>'));
   const disc = $('<div class="grid g2"></div>');
-  disc.append(barChart('New artists discovered each month', S.new_artists_per_month, 'artists'));
+  disc.append(barChart(S.has_prior_history ? `New artists discovered each month (${fmt(S.new_artists_total)} never played before ${S.year})` : 'New artists discovered each month', S.new_artists_per_month, 'artists'));
+  if (S.top_new_artists?.length) disc.append(rankCard(S.has_prior_history ? `Best new discoveries of ${S.year}` : 'Top artists by first listen', S.top_new_artists));
   disc.append($(`<div class="card"><h3>Top artist each month</h3><ol class="rank">${S.top_artist_by_month.map(d => `<li><span class="i" style="width:30px">${d.month}</span><span class="t">${esc(d.artist)}</span><span class="val">${fmt(d.minutes)} min</span></li>`).join('')}</ol>
     ${f.ride_or_die.length ? `<p style="margin:14px 0 0;color:var(--text-secondary);font-size:13px">Ride-or-die (played every month):</p>${f.ride_or_die.map(a => `<span class="pill">${esc(a)}</span>`).join('')}` : ''}</div>`));
   app.append(disc);

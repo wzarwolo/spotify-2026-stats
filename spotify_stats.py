@@ -98,6 +98,15 @@ def _normalize(row: dict) -> dict | None:
     return None
 
 
+REASONS = {
+    "trackdone": "Played to the end", "endplay": "Stopped or switched", "fwdbtn": "Skipped (next button)",
+    "backbtn": "Went back", "clickrow": "Picked another song", "remote": "Changed from another device",
+    "logout": "Logged out", "playbtn": "Pressed play", "appload": "App opened",
+    "unexpected-exit": "App closed while playing", "unexpected-exit-while-paused": "App closed while paused",
+    "trackerror": "Playback error", "popup": "Popup", "uriopen": "Opened a link",
+}
+
+
 def _platform(raw: str | None) -> str | None:
     if not raw:
         return None
@@ -113,8 +122,9 @@ def _platform(raw: str | None) -> str | None:
     return "Other"
 
 
-def load(src: Path, year: int, tz: ZoneInfo) -> tuple[list[dict], list[str]]:
-    seen, rows, files = set(), [], []
+def load(src: Path, year: int, tz: ZoneInfo) -> tuple[list[dict], list[str], set[str]]:
+    """Returns (plays in `year`, files read, artists streamed in earlier years)."""
+    seen, rows, files, prior = set(), [], [], set()
     for name, blob in _iter_json_blobs(src):
         files.append(name)
         for raw in blob if isinstance(blob, list) else []:
@@ -129,8 +139,10 @@ def load(src: Path, year: int, tz: ZoneInfo) -> tuple[list[dict], list[str]]:
             r["start"] = r["end"] - timedelta(milliseconds=r["ms"])
             if r["end"].year == year:
                 rows.append(r)
+            elif r["end"].year < year and r["kind"] == "track" and r["ms"] >= STREAM_MS:
+                prior.add(r["artist"])
     rows.sort(key=lambda r: r["end"])
-    return rows, files
+    return rows, files, prior
 
 
 # --------------------------------------------------------------------------
@@ -163,7 +175,8 @@ def _gini(values) -> float:
     return (2 * cum) / (n * sum(v)) - (n + 1) / n
 
 
-def compute(rows: list[dict], year: int) -> dict:
+def compute(rows: list[dict], year: int, prior_artists: set[str] | None = None) -> dict:
+    prior_artists = prior_artists or set()
     music = [r for r in rows if r["kind"] == "track"]
     pods = [r for r in rows if r["kind"] == "episode"]
     played = [r for r in music if r["ms"] > 0]
@@ -259,10 +272,12 @@ def compute(rows: list[dict], year: int) -> dict:
     ride_or_die = [a for a, ms in artist_months.items() if len(ms) == len(months_present)] if months_present else []
     ride_or_die.sort(key=lambda a: -by_artist_min[a])
 
-    # Discovery: artists first heard each month (within this year)
+    # Discovery: artists first heard each month. When the export covers earlier
+    # years, artists you'd already streamed before this year don't count as new.
     first_seen = {}
     for r in streams:
-        first_seen.setdefault(r["artist"], r["end"].month)
+        if r["artist"] not in prior_artists:
+            first_seen.setdefault(r["artist"], r["end"].month)
     new_per_month = [0] * 12
     for m in first_seen.values():
         new_per_month[m - 1] += 1
@@ -299,8 +314,8 @@ def compute(rows: list[dict], year: int) -> dict:
                            or r["reason_end"] in ("fwdbtn",))
     quick_skips = Counter(tkey(r) for r in played if r["ms"] < 10_000)
     most_skipped = (skip_counter or quick_skips).most_common(1)
-    reason_start = Counter(r["reason_start"] for r in rows if r["reason_start"])
-    reason_end = Counter(r["reason_end"] for r in rows if r["reason_end"])
+    reason_start = Counter(REASONS.get(r["reason_start"], r["reason_start"]) for r in rows if r["reason_start"])
+    reason_end = Counter(REASONS.get(r["reason_end"], r["reason_end"]) for r in rows if r["reason_end"])
 
     night = sum(hourly[0:5]) / (total_min or 1)
     morning = sum(hourly[5:12]) / (total_min or 1)
@@ -335,6 +350,7 @@ def compute(rows: list[dict], year: int) -> dict:
     completion = round(100 * len(streams) / len(played), 1) if played else None
 
     has_extended = any(r["platform"] for r in rows)
+    n_months = rows[-1]["end"].month if rows else 12   # don't chart months that haven't happened
 
     return {
         "year": year,
@@ -360,12 +376,15 @@ def compute(rows: list[dict], year: int) -> dict:
         "top_artists_plays": _top(by_artist_plays, 15),
         "top_albums": _top(by_album_min, 10),
         "top_podcasts": _top(pod_min, 5),
-        "monthly": [{"label": MONTHS[i], "value": round(v)} for i, v in enumerate(monthly)],
+        "monthly": [{"label": MONTHS[i], "value": round(v)} for i, v in enumerate(monthly[:n_months])],
         "hourly": [{"label": f"{h}", "value": round(v)} for h, v in enumerate(hourly)],
         "weekday": [{"label": DAYS[i], "value": round(v)} for i, v in enumerate(weekday_tot)],
         "heatmap": [[round(v) for v in row] for row in heat],
         "calendar": calendar,
-        "new_artists_per_month": [{"label": MONTHS[i], "value": v} for i, v in enumerate(new_per_month)],
+        "new_artists_per_month": [{"label": MONTHS[i], "value": v} for i, v in enumerate(new_per_month[:n_months])],
+        "new_artists_total": sum(new_per_month),
+        "has_prior_history": bool(prior_artists),
+        "top_new_artists": _top(Counter({a: by_artist_min[a] for a in first_seen}), 10),
         "top_artist_by_month": top_by_month,
         "platforms": _top(Counter(r["platform"] for r in rows if r["platform"]), 6),
         "countries": _top(Counter(r["country"] for r in rows if r["country"]), 6),
@@ -415,14 +434,14 @@ def main():
     args = ap.parse_args()
 
     tz = ZoneInfo(args.tz) if args.tz else datetime.now().astimezone().tzinfo
-    rows, files = load(Path(args.data).expanduser(), args.year, tz)
+    rows, files, prior = load(Path(args.data).expanduser(), args.year, tz)
     if not files:
         raise SystemExit(f"No streaming-history JSON found in {args.data}. "
                          "See README.md for how to request your export.")
     if not rows:
         raise SystemExit(f"Found {len(files)} file(s) but no plays in {args.year}.")
 
-    stats = compute(rows, args.year)
+    stats = compute(rows, args.year, prior)
     stats["source_files"] = len(files)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
