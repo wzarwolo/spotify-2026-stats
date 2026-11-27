@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -122,9 +123,9 @@ def _platform(raw: str | None) -> str | None:
     return "Other"
 
 
-def load(src: Path, year: int, tz: ZoneInfo) -> tuple[list[dict], list[str], set[str]]:
-    """Returns (plays in `year`, files read, artists streamed in earlier years)."""
-    seen, rows, files, prior = set(), [], [], set()
+def load(src: Path, tz: ZoneInfo) -> tuple[list[dict], list[str]]:
+    """Every play in the export (all years), sorted, plus the files read."""
+    seen, rows, files = set(), [], []
     for name, blob in _iter_json_blobs(src):
         files.append(name)
         for raw in blob if isinstance(blob, list) else []:
@@ -137,12 +138,9 @@ def load(src: Path, year: int, tz: ZoneInfo) -> tuple[list[dict], list[str], set
             seen.add(key)
             r["end"] = r["end"].astimezone(tz)
             r["start"] = r["end"] - timedelta(milliseconds=r["ms"])
-            if r["end"].year == year:
-                rows.append(r)
-            elif r["end"].year < year and r["kind"] == "track" and r["ms"] >= STREAM_MS:
-                prior.add(r["artist"])
+            rows.append(r)
     rows.sort(key=lambda r: r["end"])
-    return rows, files, prior
+    return rows, files
 
 
 # --------------------------------------------------------------------------
@@ -175,8 +173,13 @@ def _gini(values) -> float:
     return (2 * cum) / (n * sum(v)) - (n + 1) / n
 
 
-def compute(rows: list[dict], year: int, prior_artists: set[str] | None = None) -> dict:
-    prior_artists = prior_artists or set()
+def compute(rows: list[dict], year: int, past: list[dict] | None = None, light: bool = False) -> dict:
+    """Stats for one year. `past` = plays from earlier years (for discovery,
+    loyalty and comeback stats). `light` skips the heavy extras (used for the
+    per-year comparison summaries)."""
+    past = past or []
+    prior_artists = {r["artist"] for r in past
+                     if r["kind"] == "track" and r["ms"] >= STREAM_MS}
     music = [r for r in rows if r["kind"] == "track"]
     pods = [r for r in rows if r["kind"] == "episode"]
     played = [r for r in music if r["ms"] > 0]
@@ -352,8 +355,16 @@ def compute(rows: list[dict], year: int, prior_artists: set[str] | None = None) 
     has_extended = any(r["platform"] for r in rows)
     n_months = rows[-1]["end"].month if rows else 12   # don't chart months that haven't happened
 
+    extras = {} if light else extra_stats(rows, streams, played, past, year, prior_artists,
+                                         first_seen, by_artist_min, tkey)
+    clock = [sum(hourly[5:12]), sum(hourly[12:17]), sum(hourly[17:22]), sum(hourly[22:]) + sum(hourly[:5])]
     return {
         "year": year,
+        "extras": extras,
+        "clock": [{"label": l, "value": round(100 * v / (total_min or 1), 1)}
+                  for l, v in zip(["Morning (5–12)", "Afternoon (12–5)", "Evening (5–10)", "Night (10–5)"], clock)],
+        "artist_minutes": [[a, round(m), by_artist_plays[a]] for a, m in by_artist_min.most_common(200)],
+        "track_minutes": [[t, round(m), by_track_plays[t]] for t, m in by_track_min.most_common(100)],
         "has_extended": has_extended,
         "range": [rows[0]["end"].strftime("%b %-d, %Y"), rows[-1]["end"].strftime("%b %-d, %Y")] if rows else None,
         "totals": {
@@ -424,6 +435,291 @@ def compute(rows: list[dict], year: int, prior_artists: set[str] | None = None) 
 
 
 # --------------------------------------------------------------------------
+# Objective artist score
+# --------------------------------------------------------------------------
+SCORE_WEIGHTS = {   # how much each signal counts toward an artist's score
+    "minutes": 0.25,     # total time
+    "days": 0.20,        # how many different days you played them
+    "months": 0.15,      # how many months of the year they showed up
+    "songs": 0.15,       # how many of their songs you played (depth)
+    "completion": 0.10,  # share of plays you didn't skip
+    "years": 0.15,       # how many years of your history they appear in
+}
+SCORE_LABELS = {"minutes": "Minutes", "days": "Days played", "months": "Months present",
+                "songs": "Different songs", "completion": "Didn't skip", "years": "Years in your history"}
+
+
+def artist_scores(played, streams, past, n=10):
+    """Rank artists on several signals at once, so one binge week can't win.
+    Each signal is scaled 0-1, then combined with SCORE_WEIGHTS into a
+    0-100 score. Only artists you streamed 10+ times are ranked."""
+    m = defaultdict(lambda: {"minutes": 0.0, "plays": 0, "streams": 0, "days": set(),
+                             "months": set(), "songs": set()})
+    for r in played:
+        a = m[r["artist"]]
+        a["minutes"] += r["ms"] / 60000
+        a["plays"] += 1
+    for r in streams:
+        a = m[r["artist"]]
+        a["streams"] += 1
+        a["days"].add(r["end"].date())
+        a["months"].add(r["end"].month)
+        a["songs"].add(r["track"])
+    past_years = defaultdict(Counter)
+    for r in past:
+        if r["kind"] == "track" and r["ms"] >= STREAM_MS:
+            past_years[r["artist"]][r["end"].year] += 1
+    pool = {k: v for k, v in m.items() if v["streams"] >= 10}
+    if not pool:
+        return []
+    raw = {k: {"minutes": v["minutes"], "days": len(v["days"]), "months": len(v["months"]),
+               "songs": len(v["songs"]), "completion": v["streams"] / max(1, v["plays"]),
+               "years": 1 + sum(1 for c in past_years[k].values() if c >= 5)}
+           for k, v in pool.items()}
+
+    # Normalize each signal to 0-1. Volume signals are measured against your
+    # #1 artist on a square-root scale (so big gaps still matter but one
+    # binge can't dominate); months, completion and years are already bounded.
+    n_months = len({r["end"].month for r in streams}) or 12
+    max_years = max(x["years"] for x in raw.values())
+    peak = {k: max(x[k] for x in raw.values()) or 1 for k in ("minutes", "days", "songs")}
+    pcts = {
+        "minutes": {k: math.sqrt(x["minutes"] / peak["minutes"]) for k, x in raw.items()},
+        "days": {k: math.sqrt(x["days"] / peak["days"]) for k, x in raw.items()},
+        "songs": {k: math.sqrt(x["songs"] / peak["songs"]) for k, x in raw.items()},
+        "months": {k: x["months"] / n_months for k, x in raw.items()},
+        "completion": {k: x["completion"] for k, x in raw.items()},
+        "years": {k: x["years"] / max_years for k, x in raw.items()},
+    }
+    score = {k: 100 * sum(w * pcts[metric][k] for metric, w in SCORE_WEIGHTS.items()) for k in raw}
+    by_min = [a for a, _ in sorted(raw.items(), key=lambda kv: -kv[1]["minutes"])]
+    out = []
+    for k in sorted(score, key=lambda k: -score[k])[:n]:
+        x = raw[k]
+        out.append({
+            "name": k, "score": round(score[k], 1), "minutes_rank": by_min.index(k) + 1,
+            "minutes": round(x["minutes"]), "days": x["days"], "months": x["months"],
+            "songs": x["songs"], "completion": round(100 * x["completion"]), "years": x["years"],
+            "since": min(past_years[k]) if past_years[k] else None,
+            "parts": {metric: round(100 * pcts[metric][k]) for metric in SCORE_WEIGHTS},
+        })
+    return out
+
+
+# --------------------------------------------------------------------------
+# More unique stats
+# --------------------------------------------------------------------------
+FEAT_RX = re.compile(r"[(\[]\s*(?:feat\.?|ft\.?|featuring|with)\s+([^)\]]+)[)\]]", re.I)
+
+
+def extra_stats(rows, streams, played, past, year, prior_artists, first_seen, by_artist_min, tkey):
+    x = {}
+    music_rows = [r for r in rows if r["kind"] == "track"]
+
+    # Objective top artists
+    x["true_top"] = artist_scores(played, streams, past)
+    x["score_weights"] = {SCORE_LABELS[k]: v for k, v in SCORE_WEIGHTS.items()}
+
+    # Longest-running favorite: artist in your current top 50 you've known longest
+    past_first = {}
+    past_year_sets = defaultdict(set)
+    for r in past:
+        if r["kind"] == "track" and r["ms"] >= STREAM_MS:
+            past_first.setdefault(r["artist"], r["end"])
+            past_year_sets[r["artist"]].add(r["end"].year)
+    top50 = [a for a, _ in by_artist_min.most_common(50)]
+    olds = [(past_first[a], a) for a in top50 if a in past_first]
+    if olds:
+        d, a = min(olds)
+        x["oldest_favorite"] = {"artist": a, "since": d.strftime("%b %Y"),
+                                "years": year - d.year}
+    # Most loyal across years: in the most different years (incl. this one)
+    if past_year_sets:
+        here = {r["artist"] for r in streams}
+        loyal = max(here, key=lambda a: (len(past_year_sets.get(a, ())), by_artist_min[a]), default=None)
+        if loyal and past_year_sets.get(loyal):
+            yrs = sorted(past_year_sets[loyal] | {year})
+            x["most_loyal"] = {"artist": loyal, "years": len(yrs), "first": yrs[0]}
+
+    # Comeback song: big in an earlier year, silent last year, back this year
+    past_track_year = defaultdict(Counter)
+    for r in past:
+        if r["kind"] == "track" and r["ms"] >= STREAM_MS:
+            past_track_year[tkey(r)][r["end"].year] += 1
+    now_plays = Counter(tkey(r) for r in streams)
+    comebacks = []
+    for t, n in now_plays.items():
+        hist = past_track_year.get(t)
+        if not hist or n < 5:
+            continue
+        peak_year, peak = max(hist.items(), key=lambda kv: kv[1])
+        if peak >= 10 and hist.get(year - 1, 0) == 0 and peak_year < year - 1:
+            comebacks.append((n, t, peak_year, peak))
+    if comebacks:
+        n, t, py, pk = max(comebacks)
+        x["comeback_song"] = {"track": t, "plays": n, "peak_year": py, "peak_plays": pk}
+
+    # Fastest obsession: new artist with most minutes in their first 30 days
+    fast = Counter()
+    first_play = {}
+    for r in played:
+        a = r["artist"]
+        if a in prior_artists:
+            continue
+        first_play.setdefault(a, r["end"])
+        if r["end"] - first_play[a] <= timedelta(days=30):
+            fast[a] += r["ms"] / 60000
+    if fast:
+        a, mins = fast.most_common(1)[0]
+        x["fastest_obsession"] = {"artist": a, "minutes": round(mins),
+                                  "since": first_play[a].strftime("%b %-d")}
+
+    # Seasonal fling: artist (60+ min) whose listening is most packed into one month
+    am = defaultdict(Counter)
+    for r in played:
+        am[r["artist"]][r["end"].month] += r["ms"] / 60000
+    flings = [(c.most_common(1)[0][1] / sum(c.values()), a, c.most_common(1)[0][0], sum(c.values()))
+              for a, c in am.items() if sum(c.values()) >= 60]
+    if flings:
+        share, a, mo, tot = max(flings, key=lambda f: (round(f[0], 2), f[3]))
+        x["seasonal_fling"] = {"artist": a, "month": MONTHS[mo - 1], "share": round(100 * share),
+                               "minutes": round(tot)}
+
+    # Skip patience: how long before you usually skip
+    skipped = sorted(r["ms"] for r in played if r["skipped"] or r["reason_end"] == "fwdbtn")
+    if skipped:
+        x["skip_patience_sec"] = round(skipped[len(skipped) // 2] / 1000)
+
+    # Most impatient day (30+ plays)
+    day_p, day_s = Counter(), Counter()
+    for r in played:
+        d = r["end"].date()
+        day_p[d] += 1
+        if r["skipped"] or r["ms"] < STREAM_MS:
+            day_s[d] += 1
+    rates = [(day_s[d] / n, d, n) for d, n in day_p.items() if n >= 30]
+    if rates:
+        rt, d, n = max(rates)
+        x["skippiest_day"] = {"date": d.strftime("%A, %b %-d"), "rate": round(100 * rt), "plays": n}
+
+    # Longest single play
+    if music_rows:
+        r = max(music_rows, key=lambda r: r["ms"])
+        x["longest_play"] = {"track": tkey(r), "minutes": round(r["ms"] / 60000, 1)}
+
+    # Most-featured guest artist (from "feat." in titles)
+    feats = Counter()
+    for r in streams:
+        for m in FEAT_RX.findall(r["track"]):
+            for name in re.split(r",|&| and ", m):
+                if name.strip():
+                    feats[name.strip()] += 1
+    if feats:
+        a, n = feats.most_common(1)[0]
+        x["feature_king"] = {"artist": a, "plays": n}
+
+    # Album purist: share of plays that followed a different song from the same album
+    seq = same = 0
+    for a, b in zip(played, played[1:]):
+        if b["start"] - a["end"] > SESSION_GAP or not b["album"]:
+            continue
+        seq += 1
+        same += (a["album"] == b["album"] and a["track"] != b["track"])
+    if seq:
+        x["album_flow"] = round(100 * same / seq, 1)
+
+    # Morning starter / night closer: most common first & last song of the day
+    firsts, lasts = {}, {}
+    for r in streams:
+        d = (r["end"] - timedelta(hours=4)).date()   # day "starts" at 4 AM
+        firsts.setdefault(d, tkey(r))
+        lasts[d] = tkey(r)
+    if firsts:
+        t, n = Counter(firsts.values()).most_common(1)[0]
+        x["day_opener"] = {"track": t, "days": n}
+        t, n = Counter(lasts.values()).most_common(1)[0]
+        x["day_closer"] = {"track": t, "days": n}
+
+    # Hidden gem: most-played song by an artist you only played one song from
+    songs_by_artist = defaultdict(set)
+    for r in streams:
+        songs_by_artist[r["artist"]].add(tkey(r))
+    gems = [(now_plays[next(iter(s))], next(iter(s))) for a, s in songs_by_artist.items() if len(s) == 1]
+    if gems:
+        n, t = max(gems)
+        x["hidden_gem"] = {"track": t, "plays": n}
+
+    # Weekday vs weekend top artist
+    wk, we = Counter(), Counter()
+    for r in played:
+        (we if r["end"].weekday() >= 5 else wk)[r["artist"]] += r["ms"] / 60000
+    if wk and we:
+        x["weekday_artist"] = wk.most_common(1)[0][0]
+        x["weekend_artist"] = we.most_common(1)[0][0]
+
+    # Old vs new: share of minutes on artists you knew before this year
+    if prior_artists:
+        tot = sum(by_artist_min.values()) or 1
+        x["familiar_share"] = round(100 * sum(v for a, v in by_artist_min.items() if a in prior_artists) / tot, 1)
+
+    # Song-hopping: average different songs per session-hour
+    days_count = len({r["end"].date() for r in streams}) or 1
+    x["songs_per_day"] = round(len(streams) / days_count, 1)
+
+    # Most consistent song: top song by number of different weeks played
+    weeks = defaultdict(set)
+    for r in streams:
+        weeks[tkey(r)].add(r["end"].isocalendar()[1])
+    if weeks:
+        t, w = max(weeks.items(), key=lambda kv: len(kv[1]))
+        x["all_year_song"] = {"track": t, "weeks": len(w)}
+
+    return x
+
+
+# --------------------------------------------------------------------------
+# Year-over-year
+# --------------------------------------------------------------------------
+def year_summary(st: dict) -> dict:
+    t, f = st["totals"], st["fun"]
+    return {
+        "minutes": t["minutes"], "streams": t["streams"], "plays": t["plays"],
+        "unique_tracks": t["unique_tracks"], "unique_artists": t["unique_artists"],
+        "active_days": t["active_days"], "avg_per_active_day": t["avg_per_active_day"],
+        "new_artists": st["new_artists_total"],
+        "top5_share": f["top5_share"], "effective_artists": f["effective_artists"],
+        # older exports leave the skip flag empty, which reads as 0% — treat as unknown
+        "skip_rate": f["skip_rate"] or None, "shuffle_rate": f["shuffle_rate"],
+        "night_share": f["night_share"], "weekend_share": f["weekend_share"],
+        "peak_hour": f["peak_hour"], "persona": f["persona"],
+        "streak": f["streak"]["days"], "one_song_artists": f["one_song_artists"],
+        "artists": st["artist_minutes"], "tracks": st["track_minutes"][:100],
+    }
+
+
+def build_history(all_rows, year, cutoff):
+    """Per-year summaries for every year with real listening. 'ytd' cuts each
+    year at the same month/day as the target year's last play, for a fair
+    comparison with an unfinished year."""
+    by_year = defaultdict(list)
+    for r in all_rows:
+        by_year[r["end"].year].append(r)
+    out = {}
+    for y in sorted(by_year):
+        if y > year:
+            continue
+        rs = by_year[y]
+        if sum(1 for r in rs if r["ms"] >= STREAM_MS) < 200:   # too little data to compare
+            continue
+        past = [r for r in all_rows if r["end"].year < y]
+        full = compute(rs, y, past, light=True)
+        ytd_rows = [r for r in rs if (r["end"].month, r["end"].day) <= cutoff]
+        ytd = compute(ytd_rows, y, past, light=True) if ytd_rows else None
+        out[y] = {"full": year_summary(full), "ytd": year_summary(ytd) if ytd else None}
+    return out
+
+
+# --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default=str(HERE / "data"), help="folder or .zip of your Spotify export")
@@ -434,14 +730,19 @@ def main():
     args = ap.parse_args()
 
     tz = ZoneInfo(args.tz) if args.tz else datetime.now().astimezone().tzinfo
-    rows, files, prior = load(Path(args.data).expanduser(), args.year, tz)
+    all_rows, files = load(Path(args.data).expanduser(), tz)
     if not files:
         raise SystemExit(f"No streaming-history JSON found in {args.data}. "
                          "See README.md for how to request your export.")
+    rows = [r for r in all_rows if r["end"].year == args.year]
     if not rows:
         raise SystemExit(f"Found {len(files)} file(s) but no plays in {args.year}.")
+    past = [r for r in all_rows if r["end"].year < args.year]
 
-    stats = compute(rows, args.year, prior)
+    stats = compute(rows, args.year, past)
+    last = rows[-1]["end"]
+    stats["history"] = build_history(all_rows, args.year, (last.month, last.day))
+    stats["cutoff"] = last.strftime("%b %-d")
     stats["source_files"] = len(files)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

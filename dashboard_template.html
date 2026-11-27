@@ -46,6 +46,7 @@ ol.rank li { display: grid; grid-template-columns: 24px 1fr auto; gap: 8px; alig
 ol.rank .i { color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 13px; }
 ol.rank .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 ol.rank .t small { color: var(--text-secondary); }
+ol.rank li.wide { grid-template-columns: 44px 1fr auto; }
 ol.rank .bar { grid-column: 2 / 4; height: 4px; border-radius: 2px; background: var(--accent); margin-top: -2px; }
 ol.rank .val { color: var(--text-secondary); font-variant-numeric: tabular-nums; font-size: 13px; }
 .tabs { display: inline-flex; gap: 4px; background: var(--bg); padding: 3px; border-radius: 8px; margin-bottom: 10px; }
@@ -59,6 +60,16 @@ svg text { fill: var(--text-muted); font-size: 11px; }
 .empty { color: var(--text-muted); }
 details { margin-top: 10px; } summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 table { border-collapse: collapse; font-size: 12px; margin-top: 6px; } td, th { padding: 2px 10px 2px 0; text-align: left; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 4px; }
+.cmpc .k { color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+.cmpc .v { font-size: 26px; font-weight: 650; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+.cmpc .d, .true .s { color: var(--text-secondary); font-size: 13px; }
+.true .tn { font-size: 24px; font-weight: 700; margin: 4px 0 4px; }
+.parts { margin-top: 12px; display: grid; gap: 5px; }
+.part { display: grid; grid-template-columns: 110px 1fr 28px; gap: 8px; align-items: center; font-size: 12px; color: var(--text-secondary); }
+.pbar { height: 6px; background: var(--seq-0); border-radius: 3px; overflow: hidden; }
+.pbar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.pv { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-muted); }
 footer { margin-top: 50px; color: var(--text-muted); font-size: 12px; }
 </style>
 </head>
@@ -197,6 +208,91 @@ function render() {
   if (S.top_podcasts.length) tops.append(rankCard('Top podcasts', S.top_podcasts));
   app.append(tops);
 
+  // ---- True top 5 -------------------------------------------------------
+  const X = S.extras || {};
+  if (X.true_top?.length) {
+    app.append($('<h2>Your true top 5</h2>'));
+    app.append($(`<p style="margin:-6px 0 14px;color:var(--text-secondary);font-size:14px;max-width:760px">Minutes alone can be won by one binge week. This ranks artists on six signals at once: ${Object.entries(X.score_weights).map(([k, w]) => `${k.toLowerCase()} (${Math.round(w * 100)}%)`).join(', ')}. Each signal is scored against your #1 artist, and the score is out of 100.</p>`));
+    const g = $('<div class="grid g3"></div>');
+    X.true_top.slice(0, 5).forEach((a, i) => {
+      const moved = a.minutes_rank - (i + 1);
+      const parts = Object.entries(a.parts).map(([k, v]) => `<div class="part"><span>${{minutes:'Minutes',days:'Days played',months:'Months present',songs:'Different songs',completion:"Didn't skip",years:'Years in history'}[k]}</span><span class="pbar"><i style="width:${v}%"></i></span><span class="pv">${v}</span></div>`).join('');
+      g.append($(`<div class="card true"><div class="fun"><div class="k">#${i + 1} · score ${a.score}</div></div>
+        <div class="tn">${esc(a.name)}</div>
+        <div class="s">${a.minutes_rank === i + 1 ? 'Same spot as by minutes' : `#${a.minutes_rank} by minutes (${moved > 0 ? '↑' + moved : '↓' + (-moved)} here)`} · ${fmt(a.minutes)} min · ${a.days} days · ${a.songs} songs${a.since ? ` · with you since ${a.since}` : ''}</div>
+        <div class="parts">${parts}</div></div>`));
+    });
+    app.append(g);
+  }
+
+  // ---- Compare years ------------------------------------------------------
+  const H = S.history || {};
+  const years = Object.keys(H).map(Number).filter(y => y < S.year).sort((a, b) => b - a);
+  if (years.length) {
+    app.append($('<h2>Compare with past years</h2>'));
+    const box = $(`<div>
+      <div class="controls"><div class="tabs" data-k="mode"><button aria-pressed="true" data-v="ytd">Same dates (Jan 1 – ${S.cutoff})</button><button aria-pressed="false" data-v="full">Full years</button></div>
+      <div class="tabs" data-k="year">${years.map((y, i) => `<button aria-pressed="${i === 0}" data-v="${y}">vs ${y}</button>`).join('')}</div></div>
+      <div class="cmp"></div></div>`);
+    app.append(box);
+    const state = { mode: 'ytd', year: years[0] };
+    box.querySelectorAll('.tabs').forEach(tb => tb.querySelectorAll('button').forEach(b => b.onclick = () => {
+      tb.querySelectorAll('button').forEach(x => x.ariaPressed = String(x === b));
+      state[tb.dataset.k] = tb.dataset.k === 'year' ? +b.dataset.v : b.dataset.v;
+      drawCompare();
+    }));
+    function drawCompare() {
+      const cur = H[S.year][state.mode] || H[S.year].full, old = H[state.year][state.mode] || H[state.year].full;
+      const out = box.querySelector('.cmp'); out.innerHTML = '';
+      const delta = (a, b, unit = '', pts = false, lowerIsGood = null) => {
+        if (a == null || b == null) return '<span class="d">no data</span>';
+        const diff = pts ? a - b : (b ? 100 * (a - b) / b : 0);
+        const txt = `${diff > 0 ? '+' : ''}${diff.toFixed(1)}${pts ? ' pts' : '%'}`;
+        return `<span class="d">${diff > 0 ? '▲' : diff < 0 ? '▼' : '='} ${txt} vs ${fmt(b)}${unit}</span>`;
+      };
+      const row = (label, a, b, unit, pts) => `<div class="card cmpc"><div class="k">${label}</div><div class="v">${a == null ? '—' : fmt(a) + unit}</div>${delta(a, b, unit, pts)}</div>`;
+      out.append($(`<div class="grid g4">
+        ${row('Minutes', cur.minutes, old.minutes, '')}
+        ${row('Streams', cur.streams, old.streams, '')}
+        ${row('Different artists', cur.unique_artists, old.unique_artists, '')}
+        ${row('Different songs', cur.unique_tracks, old.unique_tracks, '')}
+        ${row('New artists discovered', cur.new_artists, old.new_artists, '')}
+        ${row('Avg minutes per listening day', cur.avg_per_active_day, old.avg_per_active_day, '')}
+        ${row('Loyalty (top-5 share)', cur.top5_share, old.top5_share, '%', true)}
+        ${row('Variety (effective artists)', cur.effective_artists, old.effective_artists, '')}
+        ${row('Skip rate', cur.skip_rate, old.skip_rate, '%', true)}
+        ${row('Shuffle', cur.shuffle_rate, old.shuffle_rate, '%', true)}
+        ${row('Night owl score', cur.night_share, old.night_share, '%', true)}
+        ${row('Longest streak (days)', cur.streak, old.streak, '')}
+      </div>`));
+      const rank = (list) => Object.fromEntries(list.map((a, i) => [a[0], i + 1]));
+      const rc = rank(cur.artists), ro = rank(old.artists);
+      const top25 = old.artists.slice(0, 25).map(a => a[0]);
+      const kept = top25.filter(a => rc[a] && rc[a] <= 50);
+      const climbers = cur.artists.slice(0, 50).filter(a => ro[a[0]]).map(a => ({ name: a[0], value: ro[a[0]] - rc[a[0]], from: ro[a[0]], to: rc[a[0]] }))
+        .filter(a => a.value > 0).sort((a, b) => b.value - a.value).slice(0, 6);
+      const fell = old.artists.slice(0, 15).filter(a => !rc[a[0]] || rc[a[0]] > 100).map(a => ({ name: a[0], value: a[1] })).slice(0, 6);
+      const arrivals = cur.artists.slice(0, 15).filter(a => !ro[a[0]]).map(a => ({ name: a[0], value: a[1] })).slice(0, 6);
+      const tCur = new Set(cur.tracks.map(t => t[0])), tSame = old.tracks.slice(0, 50).filter(t => tCur.has(t[0])).length;
+      const li = (items, fn) => items.length ? `<ol class="rank">${items.map((d, i) => `<li><span class="i">${i + 1}</span><span class="t">${esc(d.name)}</span><span class="val">${fn(d)}</span></li>`).join('')}</ol>` : '<p class="empty">None</p>';
+      const g2 = $('<div class="grid g3" style="margin-top:14px"></div>');
+      g2.append($(`<div class="card"><h3>Loyalty check</h3><div class="stat"><div class="n">${Math.round(100 * kept.length / (top25.length || 1))}%</div><div class="l">of your top 25 artists from ${state.year} are still in your top 50 (${kept.length} of ${top25.length})</div></div><p class="s" style="color:var(--text-secondary);font-size:13px;margin:12px 0 0">${tSame} of your top 50 songs from ${state.year} made this year's top 100. Artists stick around; songs turn over.</p></div>`));
+      g2.append($(`<div class="card"><h3>Biggest climbers</h3>${li(climbers, d => `#${d.from} → #${d.to}`)}</div>`));
+      g2.append($(`<div class="card"><h3>New in your top 15</h3>${li(arrivals, d => `${fmt(d.value)} min`)}<p style="color:var(--text-muted);font-size:12px;margin:8px 0 0">Not in your top 200 in ${state.year}</p></div>`));
+      g2.append($(`<div class="card"><h3>Faded out</h3>${li(fell, d => `${fmt(d.value)} min then`)}<p style="color:var(--text-muted);font-size:12px;margin:8px 0 0">In your ${state.year} top 15, outside your top 100 now</p></div>`));
+      g2.append($(`<div class="card"><h3>Personality shift</h3><div class="fun"><div class="v">${esc(old.persona)} → ${esc(cur.persona)}</div><div class="s">Peak hour ${hr(old.peak_hour)} → ${hr(cur.peak_hour)}</div></div></div>`));
+      out.append(g2);
+      const allYears = Object.keys(H).map(Number).sort();
+      const g3 = $('<div class="grid g2" style="margin-top:14px"></div>');
+      g3.append(barChart(`Minutes per year (${state.mode === 'ytd' ? 'Jan 1 – ' + S.cutoff : 'full year'})`, allYears.map(y => ({ label: String(y), value: (H[y][state.mode] || H[y].full).minutes })), 'min'));
+      g3.append(barChart('New artists discovered per year', allYears.map(y => ({ label: String(y), value: (H[y][state.mode] || H[y].full).new_artists })), 'artists'));
+      g3.append($(`<div class="card"><h3>Your #1 artist each year</h3><ol class="rank">${allYears.slice().reverse().map(y => { const a = (H[y][state.mode] || H[y].full).artists[0]; return `<li class="wide"><span class="i">${y}</span><span class="t">${esc(a[0])}</span><span class="val">${fmt(a[1])} min</span></li>`; }).join('')}</ol></div>`));
+      g3.append(barChart('Loyalty by year (top-5 artists’ share of minutes)', allYears.map(y => ({ label: String(y), value: (H[y][state.mode] || H[y].full).top5_share })), '%'));
+      out.append(g3);
+    }
+    drawCompare();
+  }
+
   app.append($('<h2>When you listened</h2>'));
   const when = $('<div class="grid g2"></div>');
   when.append(barChart('Minutes by month', S.monthly, 'min'));
@@ -234,11 +330,35 @@ function render() {
     ${fun('Most recent song', esc(split(f.latest_song || '')[0]), `${esc(split(f.latest_song || '')[1])} · ${f.latest_when || ''}`)}
   </div>`));
 
+  // ---- More unique stats -------------------------------------------------
+  const t2 = (o) => o ? esc(split(o.track)[0]) : null, a2 = (o) => o ? esc(split(o.track)[1]) : '';
+  app.append($('<h2>Even more unique stats</h2>'));
+  app.append($(`<div class="grid g3">
+    ${X.oldest_favorite ? fun('Longest-running favorite', esc(X.oldest_favorite.artist), `in your top 50 and with you since ${X.oldest_favorite.since} (${X.oldest_favorite.years} years)`) : ''}
+    ${X.most_loyal ? fun('Most loyal artist', esc(X.most_loyal.artist), `played in ${X.most_loyal.years} different years since ${X.most_loyal.first}`) : ''}
+    ${X.comeback_song ? fun('Comeback song', t2(X.comeback_song), `${a2(X.comeback_song)} · ${X.comeback_song.peak_plays} plays in ${X.comeback_song.peak_year}, none last year, ${X.comeback_song.plays} this year`) : ''}
+    ${X.fastest_obsession ? fun('Fastest obsession', esc(X.fastest_obsession.artist), `${fmt(X.fastest_obsession.minutes)} min in the first 30 days after you found them (${X.fastest_obsession.since})`) : ''}
+    ${X.seasonal_fling ? fun('Seasonal fling', esc(X.seasonal_fling.artist), `${X.seasonal_fling.share}% of their ${X.seasonal_fling.minutes} min happened in ${X.seasonal_fling.month}`) : ''}
+    ${X.hidden_gem ? fun('Hidden gem', t2(X.hidden_gem), `${a2(X.hidden_gem)} · ${X.hidden_gem.plays} plays, and the only song you played by them`) : ''}
+    ${X.all_year_song ? fun('All-year song', t2(X.all_year_song), `${a2(X.all_year_song)} · showed up in ${X.all_year_song.weeks} different weeks`) : ''}
+    ${X.feature_king ? fun('Feature king', esc(X.feature_king.artist), `${fmt(X.feature_king.plays)} streams of songs they were featured on`) : ''}
+    ${X.weekday_artist ? fun('Weekday vs weekend', `${esc(X.weekday_artist)} / ${esc(X.weekend_artist)}`, 'your top artist Mon–Fri vs Sat–Sun') : ''}
+    ${X.skip_patience_sec != null ? fun('Skip patience', `${X.skip_patience_sec} seconds`, 'is how long a song usually gets before you skip it') : ''}
+    ${X.skippiest_day ? fun('Most impatient day', X.skippiest_day.date, `${X.skippiest_day.rate}% of ${X.skippiest_day.plays} plays skipped or cut short`) : ''}
+    ${X.longest_play ? fun('Longest single listen', t2(X.longest_play), `${a2(X.longest_play)} · ${X.longest_play.minutes} minutes in one play`) : ''}
+    ${X.album_flow != null ? fun('Album listener score', `${X.album_flow}%`, 'of songs were followed by another song from the same album') : ''}
+    ${X.familiar_share != null ? fun('Comfort zone', `${X.familiar_share}%`, `of your minutes went to artists you already knew before ${S.year}`) : ''}
+    ${X.songs_per_day ? fun('Songs per day', X.songs_per_day, 'average streams on days you listened') : ''}
+    ${X.day_opener ? fun('Morning opener', t2(X.day_opener), `${a2(X.day_opener)} · the first song of the day ${X.day_opener.days} times`) : ''}
+    ${X.day_closer ? fun('Night closer', t2(X.day_closer), `${a2(X.day_closer)} · the last song of the day ${X.day_closer.days} times`) : ''}
+  </div>`));
+  if (S.clock) { const g = $('<div class="grid g2" style="margin-top:14px"></div>'); g.append(barChart('Your listening clock (% of minutes)', S.clock, '%')); if (S.extras?.true_top?.length) g.append(rankCard('Artist score: ranks 6–10', S.extras.true_top.slice(5, 10).map(a => ({ name: a.name, value: a.score })))); app.append(g); }
+
   app.append($('<h2>Discovery & taste over time</h2>'));
   const disc = $('<div class="grid g2"></div>');
   disc.append(barChart(S.has_prior_history ? `New artists discovered each month (${fmt(S.new_artists_total)} never played before ${S.year})` : 'New artists discovered each month', S.new_artists_per_month, 'artists'));
   if (S.top_new_artists?.length) disc.append(rankCard(S.has_prior_history ? `Best new discoveries of ${S.year}` : 'Top artists by first listen', S.top_new_artists));
-  disc.append($(`<div class="card"><h3>Top artist each month</h3><ol class="rank">${S.top_artist_by_month.map(d => `<li><span class="i" style="width:30px">${d.month}</span><span class="t">${esc(d.artist)}</span><span class="val">${fmt(d.minutes)} min</span></li>`).join('')}</ol>
+  disc.append($(`<div class="card"><h3>Top artist each month</h3><ol class="rank">${S.top_artist_by_month.map(d => `<li class="wide"><span class="i">${d.month}</span><span class="t">${esc(d.artist)}</span><span class="val">${fmt(d.minutes)} min</span></li>`).join('')}</ol>
     ${f.ride_or_die.length ? `<p style="margin:14px 0 0;color:var(--text-secondary);font-size:13px">Ride-or-die (played every month):</p>${f.ride_or_die.map(a => `<span class="pill">${esc(a)}</span>`).join('')}` : ''}</div>`));
   app.append(disc);
 
